@@ -35,17 +35,18 @@ from features.breadth_engine import BreadthCalculator
 from features.dominance_engine import DominanceCalculator
 
 # Signal Layer (Unified)
-from signal.signal_registry import SignalRegistry
+from signals.signal_registry import SignalRegistry
 from signals.signal_provider_adapter import SignalProviderAdapter
 from signals.multi_factor_aggregator import MultiFactorAggregator
 
+
 # Legacy Signal Generators (Wrapped by Adapter)
-from signals.healthy_candle_signal import HealthyCandleSignalGenerator
-from signals.momentum_signal import MomentumSignalGenerator
-from signals.strike_migration_signal import StrikeMigrationSignalGenerator
-from signals.breadth_signal import BreadthSignalGenerator
-from signals.dominance_signal import DominanceSignalGenerator
-from signals.institutional_signal import InstitutionalSignalGenerator
+from signal.healthy_candle_signal import HealthyCandleSignalGenerator
+from signal.momentum_signal import MomentumSignalGenerator
+from signal.strike_migration_signal import StrikeMigrationSignalGenerator
+from signal.breadth_signal import BreadthSignalGenerator
+from signal.dominance_signal import DominanceSignalGenerator
+from signal.institutional_signal import InstitutionalSignalGenerator
 
 # Execution & Paper Trading
 from paper_trading.paper_trade_manager import PaperTradeManager
@@ -115,12 +116,12 @@ class EngineOrchestrator:
     def _register_signal_providers(self) -> None:
         """Registers signal providers (wrapped in adapters) with the SignalRegistry."""
         providers_to_register = [
-            (HealthyCandleSignalGenerator(), weight=1.0),
-            (MomentumSignalGenerator(), weight=1.5),
-            (StrikeMigrationSignalGenerator(), weight=1.2),
-            (BreadthSignalGenerator(), weight=1.0),
-            (DominanceSignalGenerator(), weight=1.0),
-            (InstitutionalSignalGenerator(), weight=1.5),
+            (HealthyCandleSignalGenerator(), 1.0),
+            (MomentumSignalGenerator(), 1.5),       # Give momentum higher weight
+            (StrikeMigrationSignalGenerator(), 1.2),
+            (BreadthSignalGenerator(), 1.0),
+            (DominanceSignalGenerator(), 1.0),
+            (InstitutionalSignalGenerator(), 1.5),
         ]
         
         for generator, weight in providers_to_register:

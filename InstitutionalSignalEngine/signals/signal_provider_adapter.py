@@ -9,7 +9,7 @@ from typing import Any
 
 from core.logger import LoggerFactory
 from models import FeatureSnapshot
-from signal.signal_models import SignalDirection, SignalResult
+from signals.signal_models import SignalDirection, SignalResult
 
 
 class SignalProviderAdapter:

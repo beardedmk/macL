@@ -17,7 +17,7 @@ except ImportError:
 
 from core.exceptions import ValidationError
 from core.logger import LoggerFactory
-from signal.signal_models import SignalResult
+from signals.signal_models import SignalResult
 
 
 @runtime_checkable
