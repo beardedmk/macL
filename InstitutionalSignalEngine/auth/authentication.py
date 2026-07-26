@@ -1,139 +1,199 @@
 """
-Authentication module for the Institutional Signal Intelligence Engine.
+Authentication manager module for the Institutional Signal Intelligence Engine.
 
-Handles secure authentication, token management, and session lifecycle
-with the market data provider. All operations are thread-safe and 
-strictly rely on application configuration.
+Handles the Paytm Money OAuth 2.0 flow, JWT generation, token persistence,
+and validation. Strictly isolated from market data and execution logic.
 """
 
+import base64
+import json
+import os
+import secrets
 import threading
+import time
+import webbrowser
 from typing import Optional
+from urllib.parse import urlencode
 
 import requests
+from dotenv import load_dotenv
+from flask import Flask, request
 
-from config import config
-from core.exceptions import AuthenticationError
+from core.exceptions import EngineError
 from core.logger import LoggerFactory
+
+# Load environment variables at module level
+load_dotenv()
 
 
 class AuthenticationManager:
     """
-    Manages authentication state, token retrieval, and token refresh
-    cycles with the market data provider in a thread-safe manner.
+    Manages the Paytm Money authentication lifecycle, including OAuth login,
+    JWT generation, and token persistence. Thread-safe and dependency-injection ready.
     """
 
     def __init__(self) -> None:
-        """
-        Initializes the authentication manager with configuration parameters
-        and sets up thread-safe locking for token management.
-        """
         self._logger = LoggerFactory().get_logger(__name__)
         self._lock = threading.Lock()
         
-        self._access_token: Optional[str] = config.auth.access_token or None
-        self._refresh_url: str = config.auth.token_refresh_url
-        self._api_key: str = config.auth.api_key
-        self._api_secret: str = config.auth.api_secret
+        self._api_key = os.getenv("API_KEY")
+        self._api_secret = os.getenv("API_SECRET")
+        self._redirect_uri = os.getenv("REDIRECT_URI", "http://127.0.0.1:5000/callback")
+        
+        if not self._api_key or not self._api_secret:
+            raise EngineError("API_KEY and API_SECRET must be set in environment variables.")
+
+        self._login_url = "https://login.paytmmoney.com/merchant-login"
+        self._token_url = "https://developer.paytmmoney.com/accounts/v2/gettoken"
+        self._user_details_url = "https://developer.paytmmoney.com/accounts/v1/user/details"
+        self._token_file = "token.json"
+        self._state = secrets.token_hex(16)
+        
+        self._access_token: Optional[str] = None
+        self._public_access_token: Optional[str] = None
+        self._read_access_token: Optional[str] = None
+        
+        self._login_event = threading.Event()
+        self._flask_app = Flask(__name__)
+        self._setup_flask_routes()
+
+    def _setup_flask_routes(self) -> None:
+        @self._flask_app.route("/callback")
+        def callback() -> str:
+            state = request.args.get("state")
+            req_token = request.args.get("requestToken") or request.args.get("request_token")
+            
+            if state != self._state:
+                self._logger.error("Invalid state parameter in callback.")
+                return "Invalid state."
+            if not req_token:
+                self._logger.error("Request token missing in callback.")
+                return "Request Token Missing."
+                
+            try:
+                self._generate_jwt(req_token)
+            except Exception as e:
+                self._logger.error(f"Failed to generate JWT: {e}")
+                return str(e)
+                
+            self._login_event.set()
+            return "<h2>Login Successful</h2><h3>You may close this window and return to the terminal.</h3>"
+
+    def _jwt_expiry(self, token: str) -> int:
+        try:
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            return json.loads(base64.urlsafe_b64decode(payload))["exp"]
+        except Exception as e:
+            self._logger.error(f"Failed to decode JWT expiry: {e}")
+            return 0
+
+    def _save_tokens(self, data: dict) -> None:
+        with open(self._token_file, "w") as f:
+            json.dump({
+                "access_token": data["access_token"],
+                "public_access_token": data["public_access_token"],
+                "read_access_token": data["read_access_token"],
+            }, f, indent=4)
+        self._logger.info("Tokens saved successfully to disk.")
+
+    def _load_tokens(self) -> bool:
+        if not os.path.exists(self._token_file):
+            return False
+            
+        try:
+            with open(self._token_file, "r") as f:
+                data = json.load(f)
+                
+            if self._jwt_expiry(data["access_token"]) <= time.time():
+                self._logger.info("Saved tokens have expired.")
+                return False
+                
+            # Verify token with a lightweight API call
+            headers = {"x-jwt-token": data["access_token"]}
+            response = requests.get(self._user_details_url, headers=headers, timeout=10)
+            
+            if response.status_code != 200:
+                self._logger.info("Saved tokens are invalid.")
+                return False
+                
+            with self._lock:
+                self._access_token = data["access_token"]
+                self._public_access_token = data["public_access_token"]
+                self._read_access_token = data["read_access_token"]
+                
+            self._logger.info("Successfully loaded and validated saved tokens.")
+            return True
+            
+        except Exception as e:
+            self._logger.error(f"Failed to load tokens: {e}")
+            return False
+
+    def _generate_jwt(self, request_token: str) -> None:
+        payload = {
+            "api_key": self._api_key,
+            "api_secret_key": self._api_secret,
+            "request_token": request_token
+        }
+        
+        response = requests.post(self._token_url, json=payload, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+        
+        with self._lock:
+            self._access_token = data["access_token"]
+            self._public_access_token = data["public_access_token"]
+            self._read_access_token = data["read_access_token"]
+            
+        self._save_tokens(data)
+        self._logger.info("Successfully generated and saved new JWT tokens.")
 
     def login(self) -> None:
         """
-        Authenticates with the market data provider using configured 
-        credentials and retrieves the initial access token.
-        
-        Raises:
-            AuthenticationError: If the login request fails or returns no token.
+        Initiates the OAuth login flow. If valid saved tokens exist, 
+        it skips the browser login and uses them directly.
         """
-        self._logger.info("Initiating authentication login...")
-        try:
-            payload = {
-                "api_key": self._api_key,
-                "api_secret": self._api_secret,
-                "grant_type": "client_credentials"
-            }
-            
-            response = requests.post(self._refresh_url, json=payload, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            token = data.get("access_token")
-            
-            if not token:
-                raise AuthenticationError("Login response did not contain an access token.")
-                
-            with self._lock:
-                self._access_token = token
-                
-            self._logger.info("Authentication login successful.")
-            
-        except requests.RequestException as e:
-            self._logger.error(f"Login request failed: {e}")
-            raise AuthenticationError(f"Failed to authenticate: {e}") from e
-        except Exception as e:
-            self._logger.error(f"Unexpected error during login: {e}")
-            raise AuthenticationError(f"Unexpected login error: {e}") from e
+        if self._load_tokens():
+            return
 
-    def refresh_token(self) -> None:
-        """
-        Refreshes the current access token using the configured refresh endpoint.
+        self._logger.info("No valid saved tokens found. Initiating browser login...")
         
-        Raises:
-            AuthenticationError: If the refresh request fails or returns no token.
-        """
-        self._logger.info("Initiating token refresh...")
-        try:
-            current_token = self.get_access_token()
-            payload = {
-                "api_key": self._api_key,
-                "api_secret": self._api_secret,
-                "refresh_token": current_token,
-                "grant_type": "refresh_token"
-            }
-            
-            response = requests.post(self._refresh_url, json=payload, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            token = data.get("access_token")
-            
-            if not token:
-                raise AuthenticationError("Refresh response did not contain an access token.")
-                
-            with self._lock:
-                self._access_token = token
-                
-            self._logger.info("Token refresh successful.")
-            
-        except requests.RequestException as e:
-            self._logger.error(f"Token refresh request failed: {e}")
-            raise AuthenticationError(f"Failed to refresh token: {e}") from e
-        except Exception as e:
-            self._logger.error(f"Unexpected error during token refresh: {e}")
-            raise AuthenticationError(f"Unexpected refresh error: {e}") from e
-
-    def logout(self) -> None:
-        """
-        Clears the current access token and terminates the authenticated session.
-        """
-        with self._lock:
-            self._access_token = None
-        self._logger.info("User logged out and token cleared.")
+        # Start Flask server in a background daemon thread
+        server_thread = threading.Thread(
+            target=lambda: self._flask_app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False),
+            daemon=True
+        )
+        server_thread.start()
+        
+        # Open browser
+        params = {"apiKey": self._api_key, "state": self._state}
+        url = f"{self._login_url}?{urlencode(params)}"
+        self._logger.info(f"Opening login page in browser: {url}")
+        webbrowser.open(url)
+        
+        # Wait for the callback to set the event
+        self._logger.info("Waiting for authentication callback...")
+        self._login_event.wait()
+        self._logger.info("Authentication completed successfully.")
 
     def is_authenticated(self) -> bool:
-        """
-        Checks if the manager currently holds a valid access token.
-        
-        Returns:
-            True if an access token is present, False otherwise.
-        """
+        """Checks if a valid access token is currently loaded."""
         with self._lock:
-            return bool(self._access_token)
+            if not self._access_token:
+                return False
+            return self._jwt_expiry(self._access_token) > time.time()
 
     def get_access_token(self) -> Optional[str]:
-        """
-        Retrieves the current access token in a thread-safe manner.
-        
-        Returns:
-            The current access token string, or None if not authenticated.
-        """
+        """Returns the current access token."""
         with self._lock:
             return self._access_token
+
+    def get_public_access_token(self) -> Optional[str]:
+        """Returns the current public access token (used for WebSocket)."""
+        with self._lock:
+            return self._public_access_token
+
+    def get_read_access_token(self) -> Optional[str]:
+        """Returns the current read access token."""
+        with self._lock:
+            return self._read_access_token

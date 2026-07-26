@@ -1,0 +1,103 @@
+# ==============================================================================
+# 1. SECRETS & CREDENTIALS (CRITICAL: Never commit these!)
+# ==============================================================================
+.env
+token.json
+*.pem
+*.key
+
+# ==============================================================================
+# 2. PYTHON ARTIFACTS
+# ==============================================================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# ==============================================================================
+# 3. VIRTUAL ENVIRONMENTS
+# ==============================================================================
+venv/
+ENV/
+env/
+.venv/
+.venv
+venv.bak/
+
+# ==============================================================================
+# 4. PROJECT-SPECIFIC RUNTIME DATA
+# ==============================================================================
+# Local market data and LLM training logs generated at runtime
+market_data/
+llm_training_data/
+*.jsonl
+
+# Log files
+*.log
+logs/
+
+# ==============================================================================
+# 5. IDE & EDITOR SETTINGS
+# ==============================================================================
+# VS Code
+.vscode/
+*.code-workspace
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Vim / NeoVim
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# ==============================================================================
+# 6. OPERATING SYSTEM FILES
+# ==============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*

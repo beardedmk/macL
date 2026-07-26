@@ -49,6 +49,7 @@ from signals.institutional_signal import InstitutionalSignalGenerator
 
 # Execution & Paper Trading
 from paper_trading.paper_trade_manager import PaperTradeManager
+from execution.position_sizer import PositionSizer
 from models import Tick
 
 
@@ -84,8 +85,12 @@ class EngineOrchestrator:
         self._register_signal_providers()
         self._signal_aggregator = MultiFactorAggregator(self._signal_registry)
 
-        # 6. Execution (Paper Trading)
+        # 6. Execution (Paper Trading & Sizing)
         self._paper_trade_manager = PaperTradeManager()
+        self._position_sizer = PositionSizer(
+            base_risk_per_trade=0.01,  # 1% base risk
+            max_position_size=500      # Hard cap to prevent fat-finger errors
+        )
 
         # Setup graceful shutdown handlers
         signal.signal(signal.SIGINT, self._handle_shutdown)
@@ -111,7 +116,7 @@ class EngineOrchestrator:
         """Registers signal providers (wrapped in adapters) with the SignalRegistry."""
         providers_to_register = [
             (HealthyCandleSignalGenerator(), weight=1.0),
-            (MomentumSignalGenerator(), weight=1.5), # Give momentum higher weight
+            (MomentumSignalGenerator(), weight=1.5),
             (StrikeMigrationSignalGenerator(), weight=1.2),
             (BreadthSignalGenerator(), weight=1.0),
             (DominanceSignalGenerator(), weight=1.0),
@@ -154,7 +159,11 @@ class EngineOrchestrator:
         
         # Print final paper trading summary
         state = self._paper_trade_manager.get_account_state()
-        self._logger.info(f"Final Account State: Capital: {state['current_capital']:.2f}, Daily PnL: {state['daily_pnl']:.2f}")
+        history = self._paper_trade_manager.get_trade_history()
+        self._logger.info("="*50)
+        self._logger.info(f"FINAL ACCOUNT STATE: Capital: ₹{state['current_capital']:,.2f} | Daily PnL: ₹{state['daily_pnl']:,.2f}")
+        self._logger.info(f"TOTAL TRADES EXECUTED: {len(history)}")
+        self._logger.info("="*50)
         
         self._logger.info("✅ Engine shutdown complete.")
 
@@ -173,13 +182,12 @@ class EngineOrchestrator:
             return
 
         try:
-            # 1. Convert packet dict to Tick model (Simplified for this phase)
-            # In a real scenario, you'd map the packet fields to the Tick dataclass
+            # 1. Convert packet dict to Tick model
             tick = Tick(
-                timestamp=packet.get("last_trade_time") or time.time(), # Fallback
-                index_name="NIFTY", # TODO: Derive from packet security_id
-                ltp=packet.get("last_price", 0.0),
-                volume=packet.get("volume_traded", 0)
+                timestamp=packet.get("last_trade_time") or time.time(),
+                index_name="NIFTY", # TODO: Derive dynamically from security_id mapping
+                ltp=float(packet.get("last_price", 0.0)),
+                volume=int(packet.get("volume_traded", 0))
             )
 
             # 2. Feed to builders
@@ -195,26 +203,45 @@ class EngineOrchestrator:
             # 5. Aggregate Signals
             final_signal = self._signal_aggregator.aggregate(features)
 
-            # 6. Execute via Paper Trading (if signal is actionable)
+            # 6. Execute via Paper Trading (if signal is actionable and no conflicting position)
             if final_signal.decision.name in ["BUY", "SELL"]:
-                self._logger.info(f"🚨 ACTIONABLE SIGNAL: {final_signal.decision.name} | Conf: {final_signal.confidence:.1f}")
+                current_pos = self._paper_trade_manager.get_position("NIFTY")
                 
-                # Construct order request for PaperTradeManager
-                order_request = {
-                    "symbol": "NIFTY", # TODO: Dynamic symbol
-                    "side": final_signal.decision.name,
-                    "order_type": "MARKET",
-                    "quantity": 1, # TODO: Dynamic position sizing based on confidence
-                    "price": tick.ltp,
-                    "stop_loss": tick.ltp * 0.99, # Placeholder
-                    "target": tick.ltp * 1.01,    # Placeholder
-                    "signal": final_signal.decision.name,
-                    "reason": final_signal.reason_summary
-                }
-                
-                self._paper_trade_manager.place_order(order_request)
+                # Simple logic: only enter if we don't already have an opposing position
+                can_enter = True
+                if current_pos and current_pos["side"] != final_signal.decision.name:
+                    can_enter = False # Prevent reversing without explicit logic (can be enhanced later)
 
-            # 7. Always process tick for open position management (SL/Target checks)
+                if can_enter:
+                    self._logger.info(f"🚨 ACTIONABLE SIGNAL: {final_signal.decision.name} | Conf: {final_signal.confidence:.1f}%")
+                    
+                    # Dynamic Position Sizing
+                    stop_loss_distance = tick.ltp * 0.005 # Example: 0.5% SL distance
+                    quantity = self._position_sizer.calculate_quantity(
+                        available_capital=self._paper_trade_manager.get_account_state()["current_capital"],
+                        current_price=tick.ltp,
+                        signal_confidence=final_signal.confidence,
+                        stop_loss_distance=stop_loss_distance
+                    )
+                    
+                    if quantity > 0:
+                        order_request = {
+                            "symbol": "NIFTY",
+                            "side": final_signal.decision.name,
+                            "order_type": "MARKET",
+                            "quantity": quantity,
+                            "price": tick.ltp,
+                            "stop_loss": tick.ltp - stop_loss_distance if final_signal.decision.name == "BUY" else tick.ltp + stop_loss_distance,
+                            "target": tick.ltp + (stop_loss_distance * 2), # 1:2 Risk/Reward
+                            "signal": final_signal.decision.name,
+                            "reason": final_signal.reason_summary
+                        }
+                        
+                        self._paper_trade_manager.place_order(order_request)
+                    else:
+                        self._logger.warning("Signal ignored: Calculated quantity is 0 (insufficient capital/confidence).")
+
+            # 7. Always process tick for open position management (SL/Target/Trailing checks)
             self._paper_trade_manager.process_tick(tick)
             
         except Exception as e:
